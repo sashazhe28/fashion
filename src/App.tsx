@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { Camera, Search, Loader, Zap, ExternalLink, User, Star, Upload, Trash2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { analyzeFashionImage } from './services/geminiService';
+import { usePostHog } from '@posthog/react';
 
 // --- TS Types ---
 interface MarketplaceLink {
@@ -33,6 +34,7 @@ const generateSearchUrls = (query: string): MarketplaceLink[] => {
 };
 
 export default function App() {
+  const posthog = usePostHog();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [base64Image, setBase64Image] = useState<string | null>(null);
@@ -49,10 +51,12 @@ export default function App() {
     if (tg) {
       const userData = tg.initDataUnsafe?.user;
       if (userData) {
-        setTgUser({
+        const user = {
           id: userData.id,
           name: userData.username || userData.first_name || 'Пользователь'
-        });
+        };
+        setTgUser(user);
+        posthog?.identify(String(user.id), { name: user.name });
       }
       tg.ready();
       tg.expand();
@@ -61,23 +65,25 @@ export default function App() {
       setTgUser({ id: 'dev_user', name: 'Dev User' });
     }
     setIsAppReady(true);
-  }, []);
+  }, [posthog]);
 
   const handleProSubscription = useCallback(() => {
+    posthog?.capture('pro_upgrade_clicked', { already_pro: isProUser });
     if (isProUser) {
       const tg = (window as any).Telegram?.WebApp;
       if (tg) tg.showAlert('Вы уже PRO-пользователь!');
       return;
     }
-    
+
     setLoading(true);
     setTimeout(() => {
       setIsProUser(true);
       setLoading(false);
+      posthog?.capture('pro_activated');
       const tg = (window as any).Telegram?.WebApp;
       if (tg) tg.showAlert('PRO-статус активирован!');
     }, 1500);
-  }, [isProUser]);
+  }, [isProUser, posthog]);
 
   const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -88,6 +94,7 @@ export default function App() {
       return;
     }
 
+    posthog?.capture('image_uploaded', { file_size_bytes: file.size, file_type: file.type });
     const reader = new FileReader();
     reader.onloadend = () => {
       const base64 = (reader.result as string).split(',')[1];
@@ -103,21 +110,25 @@ export default function App() {
 
     setLoading(true);
     setError(null);
+    posthog?.capture('analysis_started');
 
     try {
       const itemAnalysis = await analyzeFashionImage(base64Image);
-      
+
       const enrichedResults = itemAnalysis.map((item: any) => ({
         ...item,
         marketplaceLinks: generateSearchUrls(item.searchQuery)
       }));
 
       setResults(enrichedResults);
+      posthog?.capture('analysis_completed', { item_count: enrichedResults.length });
       if (enrichedResults.length === 0) {
         setError("Предметы не найдены. Попробуйте другое фото.");
       }
     } catch (e) {
       console.error(e);
+      posthog?.captureException(e);
+      posthog?.capture('analysis_failed');
       setError("Ошибка при анализе изображения. Пожалуйста, попробуйте позже.");
     } finally {
       setLoading(false);
@@ -197,8 +208,8 @@ export default function App() {
                   {loading && (
                     <div className="absolute top-1/4 left-0 right-0 h-[1px] bg-black/50 shadow-[0_0_15px_rgba(0,0,0,0.2)] animate-pulse z-20"></div>
                   )}
-                  <button 
-                    onClick={() => { setBase64Image(null); setResults(null); }}
+                  <button
+                    onClick={() => { posthog?.capture('image_cleared'); setBase64Image(null); setResults(null); }}
                     className="absolute bottom-12 right-12 bg-black text-white p-3 rounded-none hover:bg-neutral-800 transition-colors z-20"
                   >
                     <Trash2 className="w-5 h-5" />
@@ -288,11 +299,12 @@ export default function App() {
                     
                     <div className="flex flex-wrap gap-2">
                       {item.marketplaceLinks.map((link, lIdx) => (
-                        <a 
+                        <a
                           key={lIdx}
-                          href={link.uri} 
-                          target="_blank" 
-                          rel="noopener noreferrer" 
+                          href={link.uri}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => posthog?.capture('marketplace_link_clicked', { marketplace: link.name, search_query: item.searchQuery, item_description: item.itemDescription })}
                           className="px-6 py-2 bg-black text-white text-[10px] font-extrabold uppercase tracking-widest rounded-none transition-all hover:bg-neutral-800 flex items-center gap-2"
                         >
                           {link.name}
